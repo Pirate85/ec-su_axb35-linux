@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AXB35 Fan Monitor
+Comment=Lüfterdrehzahlen & Temperatur anzeigen
+Exec=python3 "/usr/local/bin/axb35_monitor_gui.py"
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
