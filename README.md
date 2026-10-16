@@ -121,3 +121,4 @@ echo "$USER ALL=(root) NOPASSWD: /usr/sbin/smartctl" | sudo tee /etc/sudoers.d/s
 
 - `contrib/ubuntu/` – DKMS + MOK signing setup scripts
 - `contrib/netdata/` – Netdata chart integration for fan/RPM monitoring
+
