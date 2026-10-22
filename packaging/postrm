@@ -1,0 +1,45 @@
+#!/bin/bash
+# Post-removal script for ec-su_axb35-linux
+set -e
+
+echo "=== ec-su_axb35-linux: Uninstallation (post) ==="
+
+case "$1" in
+    purge)
+        # Full removal including config files
+        echo "[1/4] Removing DKMS module..."
+        dkms remove ec_su_axb35/1.1 --all 2>/dev/null || true
+
+        echo "[2/4] Removing configuration files..."
+        rm -f /etc/modules-load.d/ec_su_axb35.conf
+        rm -f /etc/sudoers.d/axb35-smartctl
+        rm -f /etc/sudoers.d/axb35-fanconfig
+        rm -f /etc/systemd/system/fancontrol.service
+
+        echo "[3/4] Removing MOK keys (if present)..."
+        rm -rf /etc/dkms/mok 2>/dev/null || true
+        rm -f /etc/dkms/framework.conf.d/ec_su_axb35 2>/dev/null || true
+
+        echo "[4/4] Cleaning up..."
+        rm -f /usr/local/bin/axb35-system-monitor
+        rm -f /usr/share/applications/ec-su_axb35-linux.desktop
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+        systemctl daemon-reload
+
+        echo "=== 🗑️  ec-su_axb35-linux fully purged. ==="
+        ;;
+    *)
+        # Regular removal (keep config files)
+        echo "[1/2] Removing DKMS module..."
+        dkms remove ec_su_axb35/1.1 --all 2>/dev/null || true
+
+        echo "[2/2] Cleaning up runtime files..."
+        rm -f /usr/local/bin/axb35-system-monitor
+        rm -f /usr/share/applications/ec-su_axb35-linux.desktop
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+
+        echo "=== ec-su_axb35-linux removed. Config files kept (use 'purge' to remove). ==="
+        ;;
+esac
+
+exit 0

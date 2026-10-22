@@ -1,0 +1,122 @@
+#!/bin/bash
+# Post-installation script for ec-su_axb35-linux (WITH MOK / Secure Boot enabled)
+set -e
+
+DKMS_MODULE="ec_su_axb35"
+DKMS_VERSION="1.1"
+
+echo "=== ec-su_axb35-linux: Installation (MOK / Secure Boot) ==="
+echo ""
+echo "  ⚠️  This version sets up MOK key signing for Secure Boot."
+echo "      A REBOOT will be required after installation to enroll the key."
+echo ""
+
+# 1) Generate MOK key pair if not already present
+MOK_KEY_DIR="/etc/dkms/mok"
+if [ ! -f "${MOK_KEY_DIR}/zmkpk.key" ]; then
+    echo "[1/7] Generating MOK signing keys..."
+    mkdir -p "$MOK_KEY_DIR"
+    openssl genrsa -out "${MOK_KEY_DIR}/zmkpk.key" 2048 2>/dev/null
+    openssl req -new -x509 -sha256 -key "${MOK_KEY_DIR}/zmkpk.key" \
+        -subj "/CN=ec_su_axb35 MOK Key/" -out "${MOK_KEY_DIR}/zmkpk.x509" 2>/dev/null
+    chmod 0600 "${MOK_KEY_DIR}/zmkpk.key"
+    echo "  Keys created in ${MOK_KEY_DIR}/"
+else
+    echo "[1/7] MOK keys already exist – reusing."
+fi
+
+# Configure DKMS to use our key
+echo "SIGNING_KEY=${MOK_KEY_DIR}/zmkpk.x509" > /etc/dkms/framework.conf.d/ec_su_axb35 2>/dev/null || \
+    mkdir -p /etc/dkms/framework.conf.d && \
+    echo "SIGNING_KEY=${MOK_KEY_DIR}/zmkpk.x509" > /etc/dkms/framework.conf.d/ec_su_axb35
+
+# 2) Register + build + install DKMS module (signed!)
+echo "[2/7] Registering DKMS module..."
+dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" || true
+
+echo "[3/7] Building kernel module (SIGNED – may take a minute)..."
+dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build" \
+    SIGNING_KEY="${MOK_KEY_DIR}/zmkpk.x509"
+
+echo "[4/7] Installing module..."
+dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build" \
+    SIGNING_KEY="${MOK_KEY_DIR}/zmkpk.x509"
+
+# 3) Auto-load at boot
+echo "[5/7] Configuring boot persistence..."
+mkdir -p /etc/modules-load.d
+echo "ec_su_axb35" > /etc/modules-load.d/ec_su_axb35.conf
+modprobe "$DKMS_MODULE" 2>/dev/null || echo "  Module will load at next boot (after MOK enrollment)."
+
+# 4) Sudoers rules
+echo "[6/7] Setting up scoped sudoers rules..."
+mkdir -p /etc/sudoers.d
+cat > /etc/sudoers.d/axb35-smartctl << 'EOF'
+%users ALL=(root) NOPASSWD: /usr/sbin/smartctl
+EOF
+chmod 0440 /etc/sudoers.d/axb35-smartctl
+
+cat > /etc/sudoers.d/axb35-fanconfig << 'EOF'
+%users ALL=(root) NOPASSWD: /bin/sh, /usr/bin/systemctl
+EOF
+chmod 0440 /etc/sudoers.d/axb35-fanconfig
+
+# 5) fancontrol.service
+echo "[7/7] Creating fancontrol.service..."
+cat > /etc/systemd/system/fancontrol.service << 'EOF'
+[Unit]
+Description=EC AXB35 Fan Control (curves + mode)
+After=multi-user.target
+ConditionPathExists=/sys/class/ec_su_axb35
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/bin/sh -c 'echo 1 > /sys/class/ec_su_axb35/fan1/mode'
+ExecStart=/bin/sh -c '\
+  echo curve > /sys/class/ec_su_axb35/fan1/mode; \
+  echo "60,70,83,95,97" > /sys/class/ec_su_axb35/fan1/rampup_curve; \
+  echo "40,50,80,94,96" > /sys/class/ec_su_axb35/fan1/rampdown_curve; \
+  echo curve > /sys/class/ec_su_axb35/fan2/mode; \
+  echo "60,70,83,95,97" > /sys/class/ec_su_axb35/fan2/rampup_curve; \
+  echo "40,50,80,94,96" > /sys/class/ec_su_axb35/fan2/rampdown_curve; \
+  echo curve > /sys/class/ec_su_axb35/fan3/mode; \
+  echo "30,52,62,70,78" > /sys/class/ec_su_axb35/fan3/rampup_curve; \
+  echo "24,46,56,64,72" > /sys/class/ec_su_axb35/fan3/rampdown_curve'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable fancontrol.service --quiet 2>/dev/null || true
+
+# Desktop entry
+desktop_file="/usr/share/applications/ec-su_axb35-linux.desktop"
+cat > "$desktop_file" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=AXB35 System-Monitor
+Comment=Fan control & system monitor for Sixunited AXB35-02
+Exec=/usr/local/bin/axb35-system-monitor
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+EOF
+update-desktop-database /usr/share/applications 2>/dev/null || true
+
+echo ""
+echo "=== ⚠️  MOK Enrollment Required! ==="
+echo ""
+echo "  A signed module was installed. If Secure Boot is active:"
+echo ""
+echo "    1. REBOOT now:  sudo reboot"
+echo "    2. At the blue MOK screen → 'Enroll MOK'"
+echo "    3. Confirm with Yes"
+echo "    4. Reboot again"
+echo ""
+echo "  After enrollment, verify:"
+echo "    mokutil --sb-state       # should say 'SecureBoot enabled'"
+echo "    lsmod | grep ec_su_axb35 # module loaded?"
+echo ""
+echo "=== ✅ ec-su_axb35-linux installed! ==="

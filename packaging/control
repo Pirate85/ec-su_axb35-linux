@@ -1,0 +1,18 @@
+Package: ec-su-axb35-linux
+Version: 1.1-1
+Section: hardware
+Priority: optional
+Architecture: amd64
+Maintainer: Pirate85 <Pirate85@web.de>
+Depends: dkms, linux-headers-generic (>= 6.0), python3-tk, smartmontools, systemd
+Recommends: openssl
+Description: Fan control driver + system monitor for Sixunited AXB35-02 EC
+ Kernel module and all-in-one GUI for fan control on AMD Strix Halo
+ mini PCs with the Sixunited AXB35-02 embedded controller board.
+ .
+ Compatible hardware: GMKtec EVO-X2, Bosgame M5, FEVM FA-EX9,
+ Peladn YO1, NIMO AI MiniPC, Corsair AI Workstation 300.
+ .
+ Features: DKMS kernel module (auto-rebuild on kernel updates),
+ live system monitor (CPU/GPU/NVMe/RAM/VRAM/fans), fan curve
+ configuration GUI with persistence via systemd service.

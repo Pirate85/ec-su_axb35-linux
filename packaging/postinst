@@ -1,0 +1,93 @@
+#!/bin/bash
+# Post-installation script for ec-su_axb35-linux (no MOK / Secure Boot disabled)
+set -e
+
+DKMS_MODULE="ec_su_axb35"
+DKMS_VERSION="1.1"
+SRC_DIR="/usr/src/${DKMS_MODULE}-${DKMS_VERSION}"
+
+echo "=== ec-su_axb35-linux: Installation ==="
+
+# 1) Register + build + install DKMS module
+echo "[1/6] Registering DKMS module..."
+dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" || true
+
+echo "[2/6] Building kernel module (this may take a minute)..."
+dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build"
+
+echo "[3/6] Installing module + enabling auto-load..."
+dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build"
+
+# 2) Auto-load at boot
+echo "[4/6] Configuring boot persistence..."
+mkdir -p /etc/modules-load.d
+echo "ec_su_axb35" > /etc/modules-load.d/ec_su_axb35.conf
+
+# Load module now (if kernel supports it)
+modprobe "$DKMS_MODULE" 2>/dev/null || echo "  Module will load at next boot."
+
+# 3) Sudoers rules (scoped, no general root)
+echo "[5/6] Setting up scoped sudoers rules..."
+mkdir -p /etc/sudoers.d
+cat > /etc/sudoers.d/axb35-smartctl << 'EOF'
+%users ALL=(root) NOPASSWD: /usr/sbin/smartctl
+EOF
+chmod 0440 /etc/sudoers.d/axb35-smartctl
+
+cat > /etc/sudoers.d/axb35-fanconfig << 'EOF'
+%users ALL=(root) NOPASSWD: /bin/sh, /usr/bin/systemctl
+EOF
+chmod 0440 /etc/sudoers.d/axb35-fanconfig
+
+# 4) Create fancontrol.service (default curves – GUI "Apply" will update it)
+echo "[6/6] Creating fancontrol.service..."
+cat > /etc/systemd/system/fancontrol.service << 'EOF'
+[Unit]
+Description=EC AXB35 Fan Control (curves + mode)
+After=multi-user.target
+ConditionPathExists=/sys/class/ec_su_axb35
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/bin/sh -c 'echo 1 > /sys/class/ec_su_axb35/fan1/mode'
+ExecStart=/bin/sh -c '\
+  echo curve > /sys/class/ec_su_axb35/fan1/mode; \
+  echo "60,70,83,95,97" > /sys/class/ec_su_axb35/fan1/rampup_curve; \
+  echo "40,50,80,94,96" > /sys/class/ec_su_axb35/fan1/rampdown_curve; \
+  echo curve > /sys/class/ec_su_axb35/fan2/mode; \
+  echo "60,70,83,95,97" > /sys/class/ec_su_axb35/fan2/rampup_curve; \
+  echo "40,50,80,94,96" > /sys/class/ec_su_axb35/fan2/rampdown_curve; \
+  echo curve > /sys/class/ec_su_axb35/fan3/mode; \
+  echo "30,52,62,70,78" > /sys/class/ec_su_axb35/fan3/rampup_curve; \
+  echo "24,46,56,64,72" > /sys/class/ec_su_axb35/fan3/rampdown_curve'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable fancontrol.service --quiet 2>/dev/null || true
+echo "  Service enabled (will apply curves at boot)."
+
+# 5) Desktop entry
+desktop_file="/usr/share/applications/ec-su_axb35-linux.desktop"
+cat > "$desktop_file" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=AXB35 System-Monitor
+Comment=Fan control & system monitor for Sixunited AXB35-02
+Exec=/usr/local/bin/axb35-system-monitor
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+EOF
+update-desktop-database /usr/share/applications 2>/dev/null || true
+
+echo ""
+echo "=== ✅ ec-su_axb35-linux installed successfully! ==="
+echo ""
+echo "  • Start monitor:   axb35-system-monitor"
+echo "  • Or via app menu: 'AXB35 System-Monitor'"
+echo "  • Check status:    sudo dkms status | grep ec_su_axb35"
+echo ""

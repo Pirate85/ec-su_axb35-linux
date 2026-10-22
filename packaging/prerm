@@ -1,0 +1,20 @@
+#!/bin/bash
+# Pre-removal script for ec-su_axb35-linux
+set -e
+
+echo "=== ec-su_axb35-linux: Uninstallation (pre) ==="
+
+# Stop the fan control service
+if systemctl is-active --quiet fancontrol.service 2>/dev/null; then
+    echo "[1/2] Stopping fancontrol.service..."
+    systemctl stop fancontrol.service || true
+fi
+
+# Disable service
+systemctl disable fancontrol.service --quiet 2>/dev/null || true
+
+# Unload kernel module (fans will fall back to EC default behavior)
+echo "[2/2] Unloading kernel module..."
+modprobe -r ec_su_axb35 2>/dev/null && echo "  Module unloaded." || echo "  Module was not loaded."
+
+exit 0
