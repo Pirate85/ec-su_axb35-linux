@@ -22,7 +22,8 @@ import tkinter as tk
 BASE_PATH     = "/sys/class/ec_su_axb35"
 DRM_DEVICE    = "/sys/class/drm/card1/device"       # amdgpu (Radeon 8060S iGPU)
 HWMON_AMDGPU  = "/sys/class/hwmon/hwmon6"            # amdgpu hwmon
-HWMON_NVME    = "/sys/class/hwmon/hwmon2"            # nvme hwmon
+HWMON_NVME    = "/sys/class/hwmon/hwmon2"            # nvme hwmon (intern 1)
+HWMON_NVME2   = "/sys/class/hwmon/hwmon7"            # nvme hwmon (intern 2 – kommt demnächst)
 UPDATE_INTERVAL = 1.5          # Sekunden zwischen Aktualisierungen
 
 # Balken-Maximalwerte (für Skalierung)
@@ -39,6 +40,31 @@ C_RED     = "#f38ba8"
 C_BLUE    = "#89b4fa"
 C_CYAN    = "#94e2d5"
 C_BAR_BG  = "#45475a"
+
+# ─── Sprache (DE/EN) ─────────────────────────────────────────────────────
+def _detect_lang():
+    """OS-Sprache erkennen: 'de' oder 'en'."""
+    lang = os.environ.get('LANG', '').lower()
+    return 'de' if lang.startswith('de') else 'en'
+
+LANG = _detect_lang()
+
+T = {
+    'de': {
+        'fan1': 'CPU Lüfter 1',
+        'fan2': 'CPU Lüfter 2',
+        'fan3': 'System-Lüfter',
+        'not_connected': 'nicht angeschlossen',
+        'zoom_hint': 'Strg +/- : Zoom · Strg 0 : Reset',
+    },
+    'en': {
+        'fan1': 'CPU Fan 1',
+        'fan2': 'CPU Fan 2',
+        'fan3': 'System Fan',
+        'not_connected': 'not connected',
+        'zoom_hint': 'Ctrl +/- : Zoom · Ctrl 0 : Reset',
+    }
+}
 
 
 # ─── Hilfsfunktionen ──────────────────────────────────────────────────────
@@ -205,6 +231,10 @@ class SystemMonitorApp:
         self.running = True
         self._prev_cpu_stat = None
 
+        # Zoom / Skalierung (Ctrl+= / Ctrl+- / Ctrl+0)
+        self.scale = 1.0
+        self._zoom_targets = []   # list of (widget, family, base_size, style)
+
         # Widget-Referenzen für Auslastungsbalken (werden beim Bauen gefüllt)
         self.usage_w = {}   # key → {'canvas', 'rect', 'value_lbl'}
 
@@ -217,8 +247,8 @@ class SystemMonitorApp:
     # ─── Fenster ────────────────────────────────────────────────────────
     def setup_window(self):
         self.root.title("AXB35 System-Monitor")
-        self.root.geometry("720x475")
-        self.root.minsize(680, 450)
+        self.root.geometry("720x430")
+        self.root.minsize(680, 410)
         self.root.configure(bg=C_BG)
 
         # Layout vor Zentrieren finalisieren (damit Canvas-Breiten korrekt sind)
@@ -228,6 +258,15 @@ class SystemMonitorApp:
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 3
         self.root.geometry(f"+{x}+{y}")
+
+        # Zoom-Bindings: Ctrl+= / Ctrl+- / Ctrl+0 (inkl. Numpad)
+        self.root.bind("<Control-plus>", lambda e: self._zoom(0.1))
+        self.root.bind("<Control-equal>", lambda e: self._zoom(0.1))
+        self.root.bind("<Control-KP_Add>", lambda e: self._zoom(0.1))
+        self.root.bind("<Control-minus>", lambda e: self._zoom(-0.1))
+        self.root.bind("<Control-KP_Subtract>", lambda e: self._zoom(-0.1))
+        self.root.bind("<Control-0>", lambda e: self._zoom_reset())
+        self.root.bind("<Control-KP_0>", lambda e: self._zoom_reset())
 
     # ─── Widgets bauen ──────────────────────────────────────────────────
     def create_widgets(self):
@@ -251,16 +290,19 @@ class SystemMonitorApp:
         cpu_col = tk.Frame(inner, bg=C_SURFACE)
         cpu_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
 
-        tk.Label(cpu_col, text="CPU", font=("Segoe UI", 9),
-                 bg=C_SURFACE, fg=C_DIM).pack()
+        _lbl = tk.Label(cpu_col, text="CPU", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_DIM); _lbl.pack()
+        self._reg(_lbl, "Segoe UI", 9)
         self.cpu_temp_lbl = tk.Label(
             cpu_col, text="--°C", font=("Segoe UI", 32, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.cpu_temp_lbl.pack()
+        self._reg(self.cpu_temp_lbl, "Segoe UI", 32, "bold")
         self.cpu_temp_sub = tk.Label(
             cpu_col, text="Min: --°  Max: --°", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
         self.cpu_temp_sub.pack(pady=(2, 0))
+        self._reg(self.cpu_temp_sub, "Segoe UI", 9)
 
         # Trennlinie 1
         tk.Frame(inner, bg=C_BAR_BG, width=1).pack(
@@ -270,16 +312,19 @@ class SystemMonitorApp:
         gpu_col = tk.Frame(inner, bg=C_SURFACE)
         gpu_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-        tk.Label(gpu_col, text="GPU", font=("Segoe UI", 9),
-                 bg=C_SURFACE, fg=C_DIM).pack()
+        _lbl = tk.Label(gpu_col, text="GPU", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_DIM); _lbl.pack()
+        self._reg(_lbl, "Segoe UI", 9)
         self.gpu_temp_lbl = tk.Label(
             gpu_col, text="--°C", font=("Segoe UI", 32, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.gpu_temp_lbl.pack()
+        self._reg(self.gpu_temp_lbl, "Segoe UI", 32, "bold")
         self.gpu_temp_sub = tk.Label(
             gpu_col, text="Radeon 8060S", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
         self.gpu_temp_sub.pack(pady=(2, 0))
+        self._reg(self.gpu_temp_sub, "Segoe UI", 9)
 
         # Trennlinie 2
         tk.Frame(inner, bg=C_BAR_BG, width=1).pack(
@@ -289,18 +334,43 @@ class SystemMonitorApp:
         nvme_col = tk.Frame(inner, bg=C_SURFACE)
         nvme_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-        tk.Label(nvme_col, text="NVMe", font=("Segoe UI", 9),
-                 bg=C_SURFACE, fg=C_DIM).pack()
+        _lbl = tk.Label(nvme_col, text="NVMe", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_DIM); _lbl.pack()
+        self._reg(_lbl, "Segoe UI", 9)
         self.nvme_temp_lbl = tk.Label(
             nvme_col, text="--°C", font=("Segoe UI", 32, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.nvme_temp_lbl.pack()
+        self._reg(self.nvme_temp_lbl, "Segoe UI", 32, "bold")
         self.nvme_temp_sub = tk.Label(
             nvme_col, text="SSD", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
         self.nvme_temp_sub.pack(pady=(2, 0))
+        self._reg(self.nvme_temp_sub, "Segoe UI", 9)
 
         # Trennlinie 3
+        tk.Frame(inner, bg=C_BAR_BG, width=1).pack(
+            side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
+
+        # NVMe 2 (intern – kommt demnächst)
+        nvme2_col = tk.Frame(inner, bg=C_SURFACE)
+        nvme2_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+
+        _lbl = tk.Label(nvme2_col, text="NVMe2", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_DIM); _lbl.pack()
+        self._reg(_lbl, "Segoe UI", 9)
+        self.nvme2_temp_lbl = tk.Label(
+            nvme2_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            bg=C_SURFACE, fg=C_DIM)
+        self.nvme2_temp_lbl.pack()
+        self._reg(self.nvme2_temp_lbl, "Segoe UI", 32, "bold")
+        self.nvme2_temp_sub = tk.Label(
+            nvme2_col, text="SSD", font=("Segoe UI", 9),
+            bg=C_SURFACE, fg=C_DIM)
+        self.nvme2_temp_sub.pack(pady=(2, 0))
+        self._reg(self.nvme2_temp_sub, "Segoe UI", 9)
+
+        # Trennlinie 4
         tk.Frame(inner, bg=C_BAR_BG, width=1).pack(
             side=tk.LEFT, fill=tk.Y, padx=6, pady=4)
 
@@ -308,16 +378,19 @@ class SystemMonitorApp:
         ext_col = tk.Frame(inner, bg=C_SURFACE)
         ext_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-        tk.Label(ext_col, text="EXT", font=("Segoe UI", 9),
-                 bg=C_SURFACE, fg=C_DIM).pack()
+        _lbl = tk.Label(ext_col, text="EXT", font=("Segoe UI", 9),
+                 bg=C_SURFACE, fg=C_DIM); _lbl.pack()
+        self._reg(_lbl, "Segoe UI", 9)
         self.ext_temp_lbl = tk.Label(
             ext_col, text="--°C", font=("Segoe UI", 32, "bold"),
             bg=C_SURFACE, fg=C_DIM)
         self.ext_temp_lbl.pack()
+        self._reg(self.ext_temp_lbl, "Segoe UI", 32, "bold")
         self.ext_temp_sub = tk.Label(
             ext_col, text="USB-SSD", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
         self.ext_temp_sub.pack(pady=(2, 0))
+        self._reg(self.ext_temp_sub, "Segoe UI", 9)
 
     # ─── Sektion 2: Auslastung (CPU%, GPU%, RAM, VRAM, NVMe) ──────────
     def _build_usage_section(self, parent):
@@ -333,21 +406,23 @@ class SystemMonitorApp:
 
     def _add_usage_row(self, parent, label_text, key):
         row = tk.Frame(parent, bg=C_BG)
-        row.pack(fill=tk.X, pady=2)
+        row.pack(fill=tk.X, pady=1)
 
         # Label links
-        tk.Label(row, text=label_text, font=("Segoe UI", 10),
-                 bg=C_BG, fg=C_TEXT, width=6, anchor="w").pack(side=tk.LEFT)
+        _lbl = tk.Label(row, text=label_text, font=("Segoe UI", 10),
+                 bg=C_BG, fg=C_TEXT, width=6, anchor="w"); _lbl.pack(side=tk.LEFT)
+        self._reg(_lbl, "Segoe UI", 10)
 
         # Balken (Canvas)
-        canvas = tk.Canvas(row, height=10, bg=C_BAR_BG, bd=0, highlightthickness=0)
-        canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8), pady=4)
-        rect_id = canvas.create_rectangle(0, 0, 2, 10, fill=C_BLUE, outline="")
+        canvas = tk.Canvas(row, height=8, bg=C_BAR_BG, bd=0, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6), pady=2)
+        rect_id = canvas.create_rectangle(0, 0, 2, 8, fill=C_BLUE, outline="")
 
         # Wert rechts
         val_lbl = tk.Label(row, text="--", font=("Consolas", 10),
                            bg=C_BG, fg=C_DIM, width=22, anchor="e")
         val_lbl.pack(side=tk.RIGHT)
+        self._reg(val_lbl, "Consolas", 10)
 
         self.usage_w[key] = {
             'canvas': canvas,
@@ -360,7 +435,7 @@ class SystemMonitorApp:
         container = tk.Frame(parent, bg=C_BG)
         container.pack(fill=tk.X, pady=(0, 12))
 
-        names = ["CPU Lüfter 1", "CPU Lüfter 2", "System-Lüfter"]
+        names = [T[LANG]['fan1'], T[LANG]['fan2'], T[LANG]['fan3']]
         self.fan_w = []
 
         for i, name in enumerate(names):
@@ -369,31 +444,35 @@ class SystemMonitorApp:
 
     def _create_fan_row(self, parent, idx, name):
         row = tk.Frame(parent, bg=C_BG)
-        row.pack(fill=tk.X, pady=3)
+        row.pack(fill=tk.X, pady=1)
 
         # Links: Name + Modus-Badge
         left = tk.Frame(row, bg=C_BG)
         left.pack(side=tk.LEFT)
 
-        tk.Label(left, text=name, font=("Segoe UI", 10),
-                 bg=C_BG, fg=C_TEXT, width=14, anchor="w").pack(side=tk.LEFT)
+        _lbl = tk.Label(left, text=name, font=("Segoe UI", 10),
+                 bg=C_BG, fg=C_TEXT, width=14, anchor="w"); _lbl.pack(side=tk.LEFT)
+        self._reg(_lbl, "Segoe UI", 10)
 
         mode_badge = tk.Label(left, text="[ -- ]", font=("Consolas", 9, "bold"),
                               bg=C_BG, fg=C_CYAN, padx=3)
         mode_badge.pack(side=tk.LEFT, padx=(6, 0))
+        self._reg(mode_badge, "Consolas", 9, "bold")
 
         # Rechts: RPM-Wert
-        tk.Label(row, text="RPM", font=("Segoe UI", 9),
-                 bg=C_BG, fg=C_DIM).pack(side=tk.RIGHT, padx=(8, 0))
+        _lbl = tk.Label(row, text="RPM", font=("Segoe UI", 9),
+                 bg=C_BG, fg=C_DIM); _lbl.pack(side=tk.RIGHT, padx=(8, 0))
+        self._reg(_lbl, "Segoe UI", 9)
 
         rpm_lbl = tk.Label(row, text="----", font=("Consolas", 12, "bold"),
                            bg=C_BG, fg=C_TEXT, width=5, anchor="e")
         rpm_lbl.pack(side=tk.RIGHT)
+        self._reg(rpm_lbl, "Consolas", 12, "bold")
 
         # Mitte: Balken
-        bar_canvas = tk.Canvas(row, height=10, bg=C_BAR_BG, bd=0, highlightthickness=0)
-        bar_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 12), pady=6)
-        bar_rect = bar_canvas.create_rectangle(0, 0, 2, 10, fill=C_BLUE, outline="")
+        bar_canvas = tk.Canvas(row, height=8, bg=C_BAR_BG, bd=0, highlightthickness=0)
+        bar_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 10), pady=2)
+        bar_rect = bar_canvas.create_rectangle(0, 0, 2, 8, fill=C_BLUE, outline="")
 
         return {
             'mode_badge': mode_badge,
@@ -402,26 +481,82 @@ class SystemMonitorApp:
             'bar_rect': bar_rect,
         }
 
-    # ─── Sektion 4: Bottom Bar (Power + Status) ─────────────────────────
+    # ─── Sektion 4: Bottom Bar (Power links + Zoom-Legende rechts) ──────
     def _build_bottom_bar(self, parent):
         frame = tk.Frame(parent, bg=C_SURFACE)
         frame.pack(fill=tk.X)
 
         inner = tk.Frame(frame, bg=C_SURFACE)
-        inner.pack(padx=14, pady=7)
+        inner.pack(fill=tk.X, padx=14, pady=6)
 
+        # Links: Power + Status
         self.power_lbl = tk.Label(
-            inner, text="Power: --", font=("Segoe UI", 10),
+            inner, text="Power: --", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
         self.power_lbl.pack(side=tk.LEFT)
+        self._reg(self.power_lbl, "Segoe UI", 9)
+
+        self.status_dot = tk.Label(inner, text="●", font=("Segoe UI", 9),
+                                   bg=C_SURFACE, fg=C_RED)
+        self.status_dot.pack(side=tk.LEFT, padx=(6, 0))
+        self._reg(self.status_dot, "Segoe UI", 9)
 
         self.status_text = tk.Label(inner, text="offline", font=("Segoe UI", 9),
-                                    bg=C_SURFACE, fg=C_RED)
-        self.status_text.pack(side=tk.RIGHT)
+                                    bg=C_SURFACE, fg=C_DIM)
+        self.status_text.pack(side=tk.LEFT, padx=(4, 0))
+        self._reg(self.status_text, "Segoe UI", 9)
 
-        self.status_dot = tk.Label(inner, text="●", font=("Segoe UI", 10),
-                                   bg=C_SURFACE, fg=C_RED)
-        self.status_dot.pack(side=tk.RIGHT, padx=(0, 4))
+        # Rechts: Zoom-Legende + aktueller %
+        self.zoom_pct_lbl = tk.Label(inner, text="100%", font=("Consolas", 9, "bold"),
+                                     bg=C_SURFACE, fg=C_TEXT)
+        self.zoom_pct_lbl.pack(side=tk.RIGHT)
+        self._reg(self.zoom_pct_lbl, "Consolas", 9, "bold")
+
+        zoom_hint = tk.Label(inner, text=T[LANG]['zoom_hint'], font=("Segoe UI", 8),
+                             bg=C_SURFACE, fg=C_DIM)
+        zoom_hint.pack(side=tk.RIGHT, padx=(0, 12))
+        self._reg(zoom_hint, "Segoe UI", 8)
+
+    # ─── Zoom / Skalierung ──────────────────────────────────────────────
+    def _reg(self, widget, family, size, style=""):
+        """Registriert ein Label für die Zoom-Skalierung."""
+        self._zoom_targets.append((widget, family, size, style))
+
+    def _zoom(self, delta):
+        """Zoom in/out um delta (z.B. +0.1 oder -0.1)."""
+        new_scale = max(0.5, min(2.0, self.scale + delta))
+        if new_scale != self.scale:
+            # Runden auf 1 Dezimalstelle um Float-Drift zu vermeiden
+            self.scale = round(new_scale, 1)
+            self._apply_zoom()
+
+    def _zoom_reset(self):
+        """Zoom zurücksetzen auf 100%."""
+        if self.scale != 1.0:
+            self.scale = 1.0
+            self._apply_zoom()
+
+    def _apply_zoom(self):
+        """Aktuelle Skalierung auf alle registrierten Widgets anwenden + Fenstergröße anpassen."""
+        for widget, family, base_size, style in self._zoom_targets:
+            new_size = max(4, int(base_size * self.scale))
+            font = (family, new_size) if not style else (family, new_size, style)
+            try:
+                widget.config(font=font)
+            except tk.TclError:
+                pass  # Widget nicht mehr vorhanden
+
+        # Fenstergröße proportional skalieren
+        base_w, base_h = 720, 430
+        w = max(360, int(base_w * self.scale))
+        h = max(240, int(base_h * self.scale))
+        self.root.geometry(f"{w}x{h}")
+
+        # Zoom-% in der Bottom-Bar aktualisieren
+        try:
+            self.zoom_pct_lbl.config(text=f"{int(self.scale * 100)}%")
+        except tk.TclError:
+            pass
 
     # ─── Farben / Logik ─────────────────────────────────────────────────
     @staticmethod
@@ -479,6 +614,15 @@ class SystemMonitorApp:
             t = data['nvme_temp']
             self.nvme_temp_lbl.config(text=f"{t}°C", fg=self.temp_color(t))
 
+        # NVMe 2 (intern – zeigt -- wenn nicht installiert)
+        nvme2_t = data.get('nvme2_temp')
+        if nvme2_t is not None:
+            self.nvme2_temp_lbl.config(text=f"{nvme2_t}°C", fg=self.temp_color(nvme2_t))
+            self.nvme2_temp_sub.config(text="SSD")
+        else:
+            self.nvme2_temp_lbl.config(text="--°C", fg=C_DIM)
+            self.nvme2_temp_sub.config(text="–")
+
         # Externe NVMe (USB) – zeigt nur wenn angeschlossen
         ext_t = data.get('ext_temp')
         if ext_t is not None:
@@ -486,7 +630,7 @@ class SystemMonitorApp:
             self.ext_temp_sub.config(text="SSD")
         else:
             self.ext_temp_lbl.config(text="--°C", fg=C_DIM)
-            self.ext_temp_sub.config(text="nicht angeschlossen")
+            self.ext_temp_sub.config(text=T[LANG]['not_connected'])
 
         # Auslastungsbalken
         self._update_bar(self.usage_w['cpu'],  data.get('cpu_pct'),
@@ -520,7 +664,7 @@ class SystemMonitorApp:
             bar_w = self.usage_w['ext']
             canvas = bar_w['canvas']
             if canvas.winfo_width() > 10:
-                canvas.coords(bar_w['rect'], 0, 0, 0, 10)
+                canvas.coords(bar_w['rect'], 0, 0, 0, 8)
             bar_w['value_lbl'].config(text="--", fg=C_DIM)
 
         # Lüfter
@@ -537,7 +681,7 @@ class SystemMonitorApp:
                 if total_w > 10:
                     ratio = min(rpm / MAX_RPM_BAR, 1.0)
                     fill_w = max(int(total_w * ratio), 3)
-                    canvas.coords(w['bar_rect'], 0, 0, fill_w, 10)
+                    canvas.coords(w['bar_rect'], 0, 0, fill_w, 8)
                 canvas.itemconfig(w['bar_rect'], fill=color)
 
             if mode:
@@ -563,7 +707,7 @@ class SystemMonitorApp:
         total_w = canvas.winfo_width()
         if total_w > 10:
             fill_w = max(int(total_w * (pct / 100.0)), 3)
-            canvas.coords(bar_w['rect'], 0, 0, fill_w, 10)
+            canvas.coords(bar_w['rect'], 0, 0, fill_w, 8)
         canvas.itemconfig(bar_w['rect'], fill=color)
         if value_text:
             bar_w['value_lbl'].config(text=value_text, fg=C_TEXT)
@@ -583,10 +727,15 @@ class SystemMonitorApp:
             if gpu_raw is not None:
                 data['gpu_temp'] = round(gpu_raw / 1000.0)
 
-            # NVMe-Temperatur (intern, hwmon, m°C → °C)
+            # NVMe-Temperatur (intern 1, hwmon, m°C → °C)
             nvme_raw = read_int(f"{HWMON_NVME}/temp1_input")
             if nvme_raw is not None:
                 data['nvme_temp'] = round(nvme_raw / 1000.0)
+
+            # NVMe-Temperatur (intern 2 – kommt demnächst, zeigt -- wenn nicht da)
+            nvme2_raw = read_int(f"{HWMON_NVME2}/temp1_input")
+            if nvme2_raw is not None:
+                data['nvme2_temp'] = round(nvme2_raw / 1000.0)
 
             # Externe NVMe (USB, via smartctl – nur wenn angeschlossen)
             ext = get_ext_nvme()
