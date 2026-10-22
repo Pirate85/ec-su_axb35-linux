@@ -2,7 +2,7 @@
 Type=Application
 Name=AXB35 Fan Monitor
 Comment=Lüfterdrehzahlen & Temperatur anzeigen
-Exec=python3 "/home/martin/KI Projekte/GMKtec Evo-X2 Lüftersteuerung/axb35_monitor_gui.py"
+Exec=/usr/local/bin/axb35-system-monitor
 Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Monitor;
