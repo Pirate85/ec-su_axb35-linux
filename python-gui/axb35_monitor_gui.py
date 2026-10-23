@@ -21,9 +21,30 @@ import tkinter as tk
 # ─── Konfiguration ────────────────────────────────────────────────────────
 BASE_PATH     = "/sys/class/ec_su_axb35"
 DRM_DEVICE    = "/sys/class/drm/card1/device"       # amdgpu (Radeon 8060S iGPU)
-HWMON_AMDGPU  = "/sys/class/hwmon/hwmon6"            # amdgpu hwmon
-HWMON_NVME    = "/sys/class/hwmon/hwmon2"            # nvme hwmon (intern 1)
-HWMON_NVME2   = "/sys/class/hwmon/hwmon7"            # nvme hwmon (intern 2 – kommt demnächst)
+# ─── Dynamische hwmon-Erkennung (Nummern ändern sich nach Reboot!) ─────
+def _discover_hwmons():
+    """Findet hwmon-Geräte per name-Datei. Robust gegen Index-Änderungen."""
+    result = {'amdgpu': None, 'nvme': []}
+    try:
+        for i in range(20):
+            name_file = f"/sys/class/hwmon/hwmon{i}/name"
+            if not os.path.exists(name_file):
+                continue
+            with open(name_file) as nf:
+                name = nf.read().strip()
+            base = f"/sys/class/hwmon/hwmon{i}"
+            if name == "amdgpu":
+                result['amdgpu'] = base
+            elif name == "nvme":
+                result['nvme'].append(base)
+    except OSError:
+        pass
+    return result
+
+_HWMON = _discover_hwmons()
+HWMON_AMDGPU  = _HWMON['amdgpu'] if _HWMON['amdgpu'] else "/sys/class/hwmon/hwmon7"
+HWMON_NVME    = _HWMON['nvme'][0] if len(_HWMON['nvme']) > 0 else None
+HWMON_NVME2   = _HWMON['nvme'][1] if len(_HWMON['nvme']) > 1 else None
 UPDATE_INTERVAL = 1.5          # Sekunden zwischen Aktualisierungen
 
 # Balken-Maximalwerte (für Skalierung)
@@ -246,7 +267,7 @@ class SystemMonitorApp:
 
     # ─── Fenster ────────────────────────────────────────────────────────
     def setup_window(self):
-        self.root.title("AXB35 System-Monitor")
+        self.root.title("Axb35-monitor")
         self.root.geometry("720x430")
         self.root.minsize(680, 410)
         self.root.configure(bg=C_BG)
@@ -722,20 +743,23 @@ class SystemMonitorApp:
             data['cpu_temp_min'] = read_int(f"{BASE_PATH}/temp1/min")
             data['cpu_temp_max'] = read_int(f"{BASE_PATH}/temp1/max")
 
-            # GPU-Temperatur (amdgpu hwmon, m°C → °C)
-            gpu_raw = read_int(f"{HWMON_AMDGPU}/temp1_input")
-            if gpu_raw is not None:
-                data['gpu_temp'] = round(gpu_raw / 1000.0)
+            # GPU-Temperatur (amdgpu hwmon, m°C → °C) – dynamisch erkannt
+            if HWMON_AMDGPU:
+                gpu_raw = read_int(f"{HWMON_AMDGPU}/temp1_input")
+                if gpu_raw is not None:
+                    data['gpu_temp'] = round(gpu_raw / 1000.0)
 
-            # NVMe-Temperatur (intern 1, hwmon, m°C → °C)
-            nvme_raw = read_int(f"{HWMON_NVME}/temp1_input")
-            if nvme_raw is not None:
-                data['nvme_temp'] = round(nvme_raw / 1000.0)
+            # NVMe-Temperatur (intern, hwmon, m°C → °C) – dynamisch erkannt
+            if HWMON_NVME:
+                nvme_raw = read_int(f"{HWMON_NVME}/temp1_input")
+                if nvme_raw is not None:
+                    data['nvme_temp'] = round(nvme_raw / 1000.0)
 
-            # NVMe-Temperatur (intern 2 – kommt demnächst, zeigt -- wenn nicht da)
-            nvme2_raw = read_int(f"{HWMON_NVME2}/temp1_input")
-            if nvme2_raw is not None:
-                data['nvme2_temp'] = round(nvme2_raw / 1000.0)
+            # NVMe2-Temperatur (intern 2, zeigt -- wenn nicht vorhanden)
+            if HWMON_NVME2:
+                nvme2_raw = read_int(f"{HWMON_NVME2}/temp1_input")
+                if nvme2_raw is not None:
+                    data['nvme2_temp'] = round(nvme2_raw / 1000.0)
 
             # Externe NVMe (USB, via smartctl – nur wenn angeschlossen)
             ext = get_ext_nvme()

@@ -64,7 +64,7 @@ build_deb() {
     cat > "${staging}/usr/share/applications/ec-su_axb35-linux.desktop" << 'DESK'
 [Desktop Entry]
 Type=Application
-Name=AXB35 System-Monitor
+Name=Axb35-monitor
 Comment=Fan control & system monitor for Sixunited AXB35-02
 Exec=/usr/local/bin/axb35-system-monitor
 Icon=utilities-system-monitor

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=AXB35 Fan Monitor
+Name=Axb35-monitor
 Comment=Lüfterdrehzahlen & Temperatur anzeigen
 Exec=/usr/local/bin/axb35-system-monitor
 Icon=utilities-system-monitor
