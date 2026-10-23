@@ -21,8 +21,7 @@ case "$1" in
         rm -f /etc/dkms/framework.conf.d/ec_su_axb35 2>/dev/null || true
 
         echo "[4/4] Cleaning up..."
-        rm -f /usr/local/bin/axb35-system-monitor
-        rm -f /usr/share/applications/ec-su_axb35-linux.desktop
+        # NOTE: /usr/local/bin/axb35-system-monitor und .desktop werden von dpkg selbst entfernt!
         update-desktop-database /usr/share/applications 2>/dev/null || true
         systemctl daemon-reload
 
@@ -34,8 +33,7 @@ case "$1" in
         dkms remove ec_su_axb35/1.1 --all 2>/dev/null || true
 
         echo "[2/2] Cleaning up runtime files..."
-        rm -f /usr/local/bin/axb35-system-monitor
-        rm -f /usr/share/applications/ec-su_axb35-linux.desktop
+        # NOTE: Binary + .desktop sind dpkg-managed → werden automatisch entfernt!
         update-desktop-database /usr/share/applications 2>/dev/null || true
 
         echo "=== ec-su_axb35-linux removed. Config files kept (use 'purge' to remove). ==="

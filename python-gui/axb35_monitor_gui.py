@@ -12,40 +12,51 @@ Start:  python3 axb35_monitor_gui.py
 
 import os
 import sys
+import json
 import time
 import subprocess
 import threading
 import tkinter as tk
 
+# ─── Config-Pfad (Zoom, Fensterposition – überlebt Neustarts) ─────────────
+CONFIG_DIR  = os.path.expanduser("~/.config/axb35-monitor")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
 
 # ─── Konfiguration ────────────────────────────────────────────────────────
 BASE_PATH     = "/sys/class/ec_su_axb35"
 DRM_DEVICE    = "/sys/class/drm/card1/device"       # amdgpu (Radeon 8060S iGPU)
-# ─── Dynamische hwmon-Erkennung (Nummern ändern sich nach Reboot!) ─────
-def _discover_hwmons():
-    """Findet hwmon-Geräte per name-Datei. Robust gegen Index-Änderungen."""
-    result = {'amdgpu': None, 'nvme': []}
+UPDATE_INTERVAL = 1.5          # Sekunden zwischen Aktualisierungen
+
+# hwmon-Indizes werden dynamisch per Name aufgelöst (robust gegen Reordering!)
+def _find_hwmons():
+    """Scannt /sys/class/hwmon/ und liefert Pfade per Gerätename."""
+    result = {'amdgpu': None, 'nvme1': None, 'nvme2': None}
+    nvme_count = 0
     try:
-        for i in range(20):
-            name_file = f"/sys/class/hwmon/hwmon{i}/name"
-            if not os.path.exists(name_file):
+        for entry in sorted(os.listdir('/sys/class/hwmon')):
+            name_file = f'/sys/class/hwmon/{entry}/name'
+            try:
+                with open(name_file) as f:
+                    dev_name = f.read().strip()
+                if dev_name == 'amdgpu':
+                    result['amdgpu'] = f'/sys/class/hwmon/{entry}'
+                elif dev_name == 'nvme':
+                    nvme_count += 1
+                    if nvme_count == 1:
+                        result['nvme1'] = f'/sys/class/hwmon/{entry}'
+                    elif nvme_count == 2:
+                        result['nvme2'] = f'/sys/class/hwmon/{entry}'
+            except (OSError, IOError):
                 continue
-            with open(name_file) as nf:
-                name = nf.read().strip()
-            base = f"/sys/class/hwmon/hwmon{i}"
-            if name == "amdgpu":
-                result['amdgpu'] = base
-            elif name == "nvme":
-                result['nvme'].append(base)
     except OSError:
         pass
     return result
 
-_HWMON = _discover_hwmons()
-HWMON_AMDGPU  = _HWMON['amdgpu'] if _HWMON['amdgpu'] else "/sys/class/hwmon/hwmon7"
-HWMON_NVME    = _HWMON['nvme'][0] if len(_HWMON['nvme']) > 0 else None
-HWMON_NVME2   = _HWMON['nvme'][1] if len(_HWMON['nvme']) > 1 else None
-UPDATE_INTERVAL = 1.5          # Sekunden zwischen Aktualisierungen
+_HWMONS = _find_hwmons()
+HWMON_AMDGPU = _HWMONS.get('amdgpu') or "/sys/class/hwmon/hwmon7"  # Fallback
+HWMON_NVME   = _HWMONS.get('nvme1')  or "/sys/class/hwmon/hwmon2"   # Fallback
+HWMON_NVME2  = _HWMONS.get('nvme2')  # None wenn nicht vorhanden
 
 # Balken-Maximalwerte (für Skalierung)
 MAX_RPM_BAR   = 6000          # RPM bei vollem Balken
@@ -76,15 +87,57 @@ T = {
         'fan2': 'CPU Lüfter 2',
         'fan3': 'System-Lüfter',
         'not_connected': 'nicht angeschlossen',
-        'zoom_hint': 'Strg +/- : Zoom · Strg 0 : Reset',
+        'zoom_hint': 'Ctrl ± Zoom · Ctrl 0 Reset',
+        # Config-GUI
+        'cfg_title': 'Lüfter-Config',
+        'cfg_cpu_fan': 'CPU-Kühler (Fan 1+2)',
+        'cfg_sys_fan': 'System-Lüfter (NVMe-Kühlung)',
+        'cfg_mode': 'Modus:',
+        'cfg_level': 'Level:',
+        'cfg_rampup': 'Ramp Up',
+        'cfg_rampdown': 'Ramp Down',
+        'cfg_power': 'APU Power Mode:',
+        'cfg_apply': 'Apply',
+        'cfg_reset_std': 'Standard laden',
+        'cfg_applied': '✓ Angewendet',
+        'cfg_error': '⚠ Fehler beim Schreiben!',
+        'cfg_nvme_ctx': 'NVMe-Temp: --°C',
+        'cfg_both_fans': '(beide Lüfter gemeinsam)',
     },
     'en': {
         'fan1': 'CPU Fan 1',
         'fan2': 'CPU Fan 2',
         'fan3': 'System Fan',
         'not_connected': 'not connected',
-        'zoom_hint': 'Ctrl +/- : Zoom · Ctrl 0 : Reset',
+        'zoom_hint': 'Ctrl ± Zoom · Ctrl 0 Reset',
+        # Config-GUI
+        'cfg_title': 'Fan Config',
+        'cfg_cpu_fan': 'CPU Cooler (Fan 1+2)',
+        'cfg_sys_fan': 'System Fan (NVMe Cooling)',
+        'cfg_mode': 'Mode:',
+        'cfg_level': 'Level:',
+        'cfg_rampup': 'Ramp Up',
+        'cfg_rampdown': 'Ramp Down',
+        'cfg_power': 'APU Power Mode:',
+        'cfg_apply': 'Apply',
+        'cfg_reset_std': 'Load Standard',
+        'cfg_applied': '✓ Applied',
+        'cfg_error': '⚠ Write Error!',
+        'cfg_nvme_ctx': 'NVMe Temp: --°C',
+        'cfg_both_fans': '(both fans together)',
     }
+}
+
+# ─── Standard-Kurven (aus Analyse/fancontrol.service) ──────────────────────
+STD_CURVES = {
+    'cpu_fan': {  # Fan 1 + 2 (gemeinsam)
+        'rampup':   [60, 70, 83, 95, 97],
+        'rampdown': [40, 50, 80, 94, 96],
+    },
+    'sys_fan': {  # Fan 3 (NVMe-Kühlung)
+        'rampup':   [20, 60, 83, 95, 97],
+        'rampdown': [0, 50, 80, 94, 96],
+    },
 }
 
 
@@ -195,6 +248,52 @@ def find_ext_mountpoint():
     return None
 
 
+def find_nvme2_mountpoint():
+    """Mountpunkt der 2. internen NVMe finden (nicht Root, nicht USB/sda*)."""
+    try:
+        with open('/proc/mounts') as f:
+            root_dev = None
+            nvme2_mp = None
+            # Ersten Pass: Root-Gerät identifizieren
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == '/':
+                    root_dev = parts[0]
+                    break
+            # Zweiten Pass: NVMe-Partition finden die NICHT Root ist
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].startswith('/dev/nvme'):
+                    if root_dev is None or parts[0] != root_dev:
+                        mp = parts[1].replace('\\040', ' ')
+                        # Skip tmpfs, squashfs etc.
+                        if not any(skip in line for skip in ('tmpfs', 'squashfs', 'udev')):
+                            nvme2_mp = mp
+                            break
+            return nvme2_mp
+    except OSError:
+        pass
+    return None
+
+
+def get_nvme2_disk_usage():
+    """Speicherplatz der 2. internen NVMe (falls vorhanden)."""
+    mp = find_nvme2_mountpoint()
+    if mp is None:
+        return None
+    try:
+        st = os.statvfs(mp)
+        frsize  = st.f_frsize
+        total   = st.f_blocks * frsize
+        free    = st.f_bavail * frsize
+        used    = total - free
+        pct     = int(100 * used / total) if total > 0 else 0
+        return {'pct': pct, 'used_gb': round(used/(1024**3), 1),
+                'total_gb': round(total/(1024**3), 1)}
+    except OSError:
+        return None
+
+
 def get_ext_disk_usage():
     """Speicherplatz der externen SSD (via statvfs auf Mountpunkt)."""
     mp = find_ext_mountpoint()
@@ -244,6 +343,614 @@ def get_ext_nvme():
         return None
 
 
+def load_config():
+    """Config laden (Zoom, Fensterposition). Liefert dict oder leeres {}."""
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(scale, win_x=None, win_y=None):
+    """Aktuelle Zoom-Stufe + Fensterposition speichern."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        cfg = load_config()  # bestehende Werte beibehalten
+        cfg['scale'] = scale
+        if win_x is not None:
+            cfg['win_x'] = int(win_x)
+        if win_y is not None:
+            cfg['win_y'] = int(win_y)
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    except OSError:
+        pass  # Config-Save ist nice-to-have, kein Hard-Fail
+
+
+def _sysfs_write(path, value):
+    """Sicheren sysfs-Write via sudo (NOPASSWD). Liefert True bei Erfolg."""
+    cmd = f'echo "{value}" > {path}'
+    try:
+        r = subprocess.run(['sudo', '-n', 'sh', '-c', cmd],
+                          capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _sysfs_read_curve(path):
+    """Curve aus sysfs lesen. Liefert List[5 ints] oder None."""
+    raw = read_sysfs(path)
+    if not raw:
+        return None
+    try:
+        vals = [int(x.strip()) for x in raw.split(',')]
+        if len(vals) == 5:
+            return vals
+    except ValueError:
+        pass
+    return None
+
+
+# ─── Config-GUI (Toplevel im Monitor) ─────────────────────────────────────
+class FanConfigWindow:
+    """Separates Toplevel-Fenster zur Lüfter-Configuration.
+
+    Enthält: CPU-Kühler (Fan 1+2 gemeinsam), System-Lüfter (Fan 3), APU Power Mode.
+    Kurven als horizontale Slider (0–100°C). Standard-Werte aus fancontrol.service.
+    """
+
+    def __init__(self, parent_root):
+        self.parent = parent_root
+        self.win = tk.Toplevel(parent_root)
+        self.win.title(T[LANG]['cfg_title'])
+        self.win.configure(bg=C_BG)
+        self.win.resizable(False, False)
+
+        # State-Variablen
+        self._cpu_mode   = tk.StringVar(value="curve")
+        self._sys_mode   = tk.StringVar(value="curve")
+        self._cpu_level  = tk.IntVar(value=3)
+        self._sys_level  = tk.IntVar(value=3)
+        self._power_mode = tk.StringVar(value="balanced")
+
+        # Kurven-Werte (werden beim Laden aktualisiert)
+        self._cpu_rampup   = list(STD_CURVES['cpu_fan']['rampup'])
+        self._cpu_rampdown = list(STD_CURVES['cpu_fan']['rampdown'])
+        self._sys_rampup   = list(STD_CURVES['sys_fan']['rampup'])
+        self._sys_rampdown = list(STD_CURVES['sys_fan']['rampdown'])
+
+        # Widget-Referenzen (dynamisch beim Bauen gefüllt)
+        self._cpu_level_frame  = None
+        self._cpu_curve_frame  = None
+        self._sys_level_frame  = None
+        self._sys_curve_frame  = None
+        self._nvme_ctx_lbl     = None
+        self._status_lbl       = None
+
+        # Slider-Referenzen: {key: [scale_widget, ...]} und Labels
+        self._sliders = {}
+        self._slider_labels = {}
+
+        # Zuerst aktuelle Werte laden (damit UI mit echten Defaults startet)
+        self._load_current_values()
+
+        # Dann UI bauen
+        self._build_ui()
+
+        # Position: rechts neben dem Monitor (oder links wenn nicht genug Platz)
+        self.win.update_idletasks()
+        sw = self.win.winfo_screenwidth()
+        px = parent_root.winfo_x() + 740
+        if px + 520 > sw:
+            px = max(10, parent_root.winfo_x() - 530)
+        py = parent_root.winfo_y()
+        self.win.geometry(f"+{px}+{py}")
+
+    # ─── UI-Aufbau ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        main = tk.Frame(self.win, bg=C_BG)
+        main.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+
+        # ── Header: Titel + Status + Apply-Button ──
+        header = tk.Frame(main, bg=C_BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+
+        title_lbl = tk.Label(header, text=f"⚙️  {T[LANG]['cfg_title']}",
+                            font=("Segoe UI", 13, "bold"), bg=C_BG, fg=C_TEXT)
+        title_lbl.pack(side=tk.LEFT)
+
+        self._status_lbl = tk.Label(header, text="", font=("Segoe UI", 9),
+                                    bg=C_BG, fg=C_GREEN)
+        self._status_lbl.pack(side=tk.RIGHT, padx=(8, 0))
+
+        apply_btn = tk.Button(header, text=T[LANG]['cfg_apply'],
+                             command=self._apply_all, width=10,
+                             bg=C_BLUE, fg="#1e1e2e", activebackground=C_CYAN,
+                             relief=tk.FLAT, font=("Segoe UI", 10, "bold"),
+                             cursor="hand2", bd=0)
+        apply_btn.pack(side=tk.RIGHT)
+
+        # ── CPU-Kühler Block (Fan 1+2) ──
+        self._build_fan_block(main, 'cpu')
+
+        # Separator
+        tk.Frame(main, bg=C_BAR_BG, height=1).pack(fill=tk.X, pady=8)
+
+        # ── System-Lüfter Block (Fan 3) ──
+        self._build_fan_block(main, 'sys')
+
+        # Separator
+        tk.Frame(main, bg=C_BAR_BG, height=1).pack(fill=tk.X, pady=8)
+
+        # ── APU Power Mode ──
+        pw_frame = tk.Frame(main, bg=C_SURFACE)
+        pw_frame.pack(fill=tk.X, pady=(0, 12))
+        inner_pw = tk.Frame(pw_frame, bg=C_SURFACE)
+        inner_pw.pack(fill=tk.X, padx=12, pady=8)
+
+        pw_lbl = tk.Label(inner_pw, text=T[LANG]['cfg_power'],
+                         font=("Segoe UI", 10), bg=C_SURFACE, fg=C_TEXT)
+        pw_lbl.pack(side=tk.LEFT)
+
+        pw_menu = tk.OptionMenu(inner_pw, self._power_mode, 'quiet', 'balanced', 'performance')
+        pw_menu.config(bg=C_SURFACE, fg=C_TEXT, activebackground=C_BAR_BG,
+                       activeforeground=C_TEXT, relief=tk.FLAT, bd=0,
+                       highlightthickness=0, font=("Segoe UI", 10), width=12)
+        pw_menu['menu'].config(bg=C_SURFACE, fg=C_TEXT,
+                               activebackground=C_BLUE,
+                               activeforeground="#1e1e2e",
+                               relief=tk.FLAT, bd=1)
+        pw_menu.pack(side=tk.RIGHT)
+
+        # ── Bottom: Reset-Standard ──
+        bottom = tk.Frame(main, bg=C_BG)
+        bottom.pack(fill=tk.X, pady=(4, 0))
+
+        reset_btn = tk.Button(bottom, text=f"↺ {T[LANG]['cfg_reset_std']}",
+                             command=self._reset_standard, width=16,
+                             bg=C_SURFACE, fg=C_TEXT, activebackground=C_BAR_BG,
+                             relief=tk.FLAT, font=("Segoe UI", 9), cursor="hand2", bd=0)
+        reset_btn.pack(side=tk.LEFT)
+
+        # ── Initiale Sichtbarkeit je nach geladenem Modus ──
+        self._on_mode_change('cpu')
+        self._on_mode_change('sys')
+
+        # ─── Live-Temperatur-Update im Config-Fenster (alle 2s) ───
+        self._update_ctx_temps()
+        self.win.after(2000, self._ctx_temp_timer)
+
+    def _ctx_temp_timer(self):
+        """Periodisches Aktualisieren der Kontext-Temperaturen."""
+        try:
+            if not self.win.winfo_exists():
+                return  # Fenster geschlossen → Timer stoppen
+            self._update_ctx_temps()
+            self.win.after(2000, self._ctx_temp_timer)
+        except tk.TclError:
+            pass
+
+    def _update_ctx_temps(self):
+        """CPU-Temp (Kühler-Block) + NVMe-Temp (System-Lüfter-Block) aktualisieren."""
+        # CPU Temp für CPU-Kühler-Block
+        if hasattr(self, '_cpu_ctx_lbl'):
+            cpu_t = read_int(f"{BASE_PATH}/temp1/temp")
+            if cpu_t is not None:
+                color = self._apu_temp_color(cpu_t)
+                self._cpu_ctx_lbl.config(text=f"CPU: {cpu_t}°C", fg=color)
+
+        # NVMe Temp für System-Lüfter-Block
+        if hasattr(self, '_nvme_ctx_lbl'):
+            nvme_t = None
+            if HWMON_NVME:
+                raw = read_int(f"{HWMON_NVME}/temp1_input")
+                if raw is not None:
+                    nvme_t = round(raw / 1000.0)
+            if nvme_t is not None:
+                color = self._ssd_temp_color(nvme_t)
+                prefix = "NVMe-Temp:" if LANG == 'de' else "NVMe Temp:"
+                self._nvme_ctx_lbl.config(text=f"{prefix} {nvme_t}°C", fg=color)
+
+    @staticmethod
+    def _apu_temp_color(t):
+        if t < 60:   return C_GREEN
+        elif t < 85: return C_YELLOW
+        else:        return C_RED
+
+    @staticmethod
+    def _ssd_temp_color(t):
+        if t < 50:   return C_GREEN
+        elif t < 70: return C_YELLOW
+        else:        return C_RED
+
+    def _build_fan_block(self, parent, which):
+        """Einen Lüfter-Config-Block bauen (cpu = Fan1+2, sys = Fan3)."""
+        is_cpu = (which == 'cpu')
+        title_key = 'cfg_cpu_fan' if is_cpu else 'cfg_sys_fan'
+
+        frame = tk.Frame(parent, bg=C_SURFACE)
+        frame.pack(fill=tk.X, pady=(0, 2))
+        inner = tk.Frame(frame, bg=C_SURFACE)
+        inner.pack(fill=tk.X, padx=12, pady=8)
+
+        # Titel + Kontext
+        title_row = tk.Frame(inner, bg=C_SURFACE)
+        title_row.pack(fill=tk.X, pady=(0, 4))
+
+        title_lbl = tk.Label(title_row, text=T[LANG][title_key],
+                            font=("Segoe UI", 11, "bold"), bg=C_SURFACE, fg=C_TEXT)
+        title_lbl.pack(side=tk.LEFT)
+
+        if is_cpu:
+            hint = tk.Label(title_row, text=f" {T[LANG]['cfg_both_fans']}",
+                           font=("Segoe UI", 8), bg=C_SURFACE, fg=C_DIM)
+            hint.pack(side=tk.LEFT, padx=(6, 0))
+            # CPU-Temp als Kontext (rechts)
+            self._cpu_ctx_lbl = tk.Label(title_row, text="CPU: --°C",
+                                         font=("Segoe UI", 9), bg=C_SURFACE, fg=C_DIM)
+            self._cpu_ctx_lbl.pack(side=tk.RIGHT)
+        else:
+            self._nvme_ctx_lbl = tk.Label(title_row, text=T[LANG]['cfg_nvme_ctx'],
+                                         font=("Segoe UI", 9), bg=C_SURFACE, fg=C_DIM)
+            self._nvme_ctx_lbl.pack(side=tk.RIGHT)
+
+        # ── Modus-Zeile ──
+        mode_row = tk.Frame(inner, bg=C_SURFACE)
+        mode_row.pack(fill=tk.X, pady=2)
+
+        mode_lbl = tk.Label(mode_row, text=T[LANG]['cfg_mode'],
+                           font=("Segoe UI", 10), bg=C_SURFACE, fg=C_TEXT)
+        mode_lbl.pack(side=tk.LEFT)
+
+        var = self._cpu_mode if is_cpu else self._sys_mode
+        mode_menu = tk.OptionMenu(mode_row, var, 'auto', 'fixed', 'curve')
+        mode_menu.config(bg=C_SURFACE, fg=C_TEXT, activebackground=C_BAR_BG,
+                         activeforeground=C_TEXT, relief=tk.FLAT, bd=0,
+                         highlightthickness=0, font=("Segoe UI", 10), width=8)
+        mode_menu['menu'].config(bg=C_SURFACE, fg=C_TEXT,
+                                 activebackground=C_BLUE,
+                                 activeforeground="#1e1e2e",
+                                 relief=tk.FLAT, bd=1)
+        mode_menu.pack(side=tk.RIGHT)
+        # Track changes (OptionMenu hat kein bind-Event → poll via trace)
+        var.trace_add('write', lambda *a: self._on_mode_change(which))
+
+        # ── Level-Zeile (nur bei "fixed" sichtbar) ──
+        level_frame = tk.Frame(inner, bg=C_SURFACE)
+        if is_cpu:
+            self._cpu_level_frame = level_frame
+        else:
+            self._sys_level_frame = level_frame
+
+        lv_lbl = tk.Label(level_frame, text=T[LANG]['cfg_level'],
+                         font=("Segoe UI", 10), bg=C_SURFACE, fg=C_TEXT)
+        lv_lbl.pack(side=tk.LEFT)
+
+        lv_var = self._cpu_level if is_cpu else self._sys_level
+        level_scale = tk.Scale(level_frame, from_=0, to=5, orient=tk.HORIZONTAL,
+                              variable=lv_var, bg=C_SURFACE, fg=C_TEXT,
+                              troughcolor=C_BAR_BG, highlightthickness=0,
+                              length=220, sliderlength=18, showvalue=True,
+                              font=("Consolas", 9), resolution=1)
+        level_scale.pack(side=tk.RIGHT)
+
+        # ── Kurven-Sektion (nur bei "curve" sichtbar) ──
+        curve_frame = tk.Frame(inner, bg=C_SURFACE)
+        if is_cpu:
+            self._cpu_curve_frame = curve_frame
+        else:
+            self._sys_curve_frame = curve_frame
+
+        self._build_curve_sliders(curve_frame, which, 'rampup')
+        self._build_curve_sliders(curve_frame, which, 'rampdown')
+
+    def _build_curve_sliders(self, parent, which, direction):
+        """5 horizontale Slider für eine Kurven-Richtung (RampUp oder RampDown)."""
+        is_cpu = (which == 'cpu')
+        dir_text = T[LANG]['cfg_rampup'] if direction == 'rampup' else T[LANG]['cfg_rampdown']
+
+        # Sektions-Header
+        hdr = tk.Label(parent, text=dir_text, font=("Segoe UI", 9, "bold"),
+                      bg=C_SURFACE, fg=C_DIM)
+        hdr.pack(anchor=tk.W, pady=(6, 2), padx=4)
+
+        # Werte-Liste holen (aktuelle State-Werte)
+        if is_cpu:
+            val_list = self._cpu_rampup if direction == 'rampup' else self._cpu_rampdown
+        else:
+            val_list = self._sys_rampup if direction == 'rampup' else self._sys_rampdown
+
+        key = f"{which}_{direction}"
+        scales = []
+        labels = []
+
+        for i in range(5):
+            row = tk.Frame(parent, bg=C_SURFACE)
+            row.pack(fill=tk.X, padx=8, pady=1)
+
+            # Level-Label (L1–L5)
+            lv_lbl = tk.Label(row, text=f"L{i+1}", font=("Consolas", 9),
+                             bg=C_SURFACE, fg=C_DIM, width=3)
+            lv_lbl.pack(side=tk.LEFT)
+
+            # Horizontaler Slider (0–100°C)
+            sv = tk.IntVar(value=val_list[i])
+            slider = tk.Scale(row, from_=0, to=100, orient=tk.HORIZONTAL,
+                             variable=sv, bg=C_SURFACE, fg=C_TEXT,
+                             troughcolor=C_BAR_BG, highlightthickness=0,
+                             length=280, sliderlength=14, showvalue=False,
+                             resolution=1)
+            slider.pack(side=tk.LEFT, padx=(4, 6))
+
+            # Wert-Label rechts
+            val_lbl = tk.Label(row, text=f"{val_list[i]}°", font=("Consolas", 9),
+                              bg=C_SURFACE, fg=C_TEXT, width=5)
+            val_lbl.pack(side=tk.RIGHT)
+
+            # Live-Update des Labels – via Var-trace (zuverlässiger als command!)
+            def _upd(*_a, _sv=sv, _lbl=val_lbl):
+                try:
+                    v = int(_sv.get())
+                    _lbl.config(text=f"{v}°")
+                except tk.TclError:
+                    pass
+            sv.trace_add('write', _upd)
+
+            scales.append(slider)
+            labels.append(val_lbl)
+
+        self._sliders[key] = scales
+        self._slider_labels[key] = labels
+
+    # ─── Logik ──────────────────────────────────────────────────────────
+    def _on_mode_change(self, which):
+        """Level-/Kurven-Sektionen ein-/ausblenden je nach Modus."""
+        is_cpu = (which == 'cpu')
+        if is_cpu:
+            mode = self._cpu_mode.get()
+            lv_frame = self._cpu_level_frame
+            cv_frame = self._cpu_curve_frame
+        else:
+            mode = self._sys_mode.get()
+            lv_frame = self._sys_level_frame
+            cv_frame = self._sys_curve_frame
+
+        if lv_frame is None or cv_frame is None:
+            return  # noch nicht gebaut
+
+        if mode == 'fixed':
+            lv_frame.pack(fill=tk.X, pady=2)
+            cv_frame.pack_forget()
+        elif mode == 'curve':
+            lv_frame.pack_forget()
+            cv_frame.pack(anchor=tk.W)
+        else:  # auto – keine weiteren Einstellungen nötig
+            lv_frame.pack_forget()
+            cv_frame.pack_forget()
+
+    def _load_current_values(self):
+        """Aktuelle sysfs-Werte lesen und in State setzen."""
+        # Fan 1 repräsentiert CPU-Kühler (Fan 1+2 gemeinsam)
+        mode = read_sysfs(f"{BASE_PATH}/fan1/mode")
+        if mode in ('auto', 'fixed', 'curve'):
+            self._cpu_mode.set(mode)
+
+        level = read_int(f"{BASE_PATH}/fan1/level")
+        if level is not None:
+            self._cpu_level.set(level)
+
+        cu = _sysfs_read_curve(f"{BASE_PATH}/fan1/rampup_curve")
+        if cu:
+            self._cpu_rampup = cu
+        cd = _sysfs_read_curve(f"{BASE_PATH}/fan1/rampdown_curve")
+        if cd:
+            self._cpu_rampdown = cd
+
+        # Fan 3 = System-Lüfter
+        mode3 = read_sysfs(f"{BASE_PATH}/fan3/mode")
+        if mode3 in ('auto', 'fixed', 'curve'):
+            self._sys_mode.set(mode3)
+
+        level3 = read_int(f"{BASE_PATH}/fan3/level")
+        if level3 is not None:
+            self._sys_level.set(level3)
+
+        cu3 = _sysfs_read_curve(f"{BASE_PATH}/fan3/rampup_curve")
+        if cu3:
+            self._sys_rampup = cu3
+        cd3 = _sysfs_read_curve(f"{BASE_PATH}/fan3/rampdown_curve")
+        if cd3:
+            self._sys_rampdown = cd3
+
+        # APU Power Mode
+        pw = read_sysfs(f"{BASE_PATH}/apu/power_mode")
+        if pw in ('quiet', 'balanced', 'performance'):
+            self._power_mode.set(pw)
+
+    def _reset_standard(self):
+        """Alle Kurven auf Standard-Werte (aus fancontrol.service) zurücksetzen."""
+        self._cpu_rampup   = list(STD_CURVES['cpu_fan']['rampup'])
+        self._cpu_rampdown = list(STD_CURVES['cpu_fan']['rampdown'])
+        self._sys_rampup   = list(STD_CURVES['sys_fan']['rampup'])
+        self._sys_rampdown = list(STD_CURVES['sys_fan']['rampdown'])
+
+        # Slider + Labels in der UI synchronisieren
+        for key, vals in [('cpu_rampup', self._cpu_rampup),
+                          ('cpu_rampdown', self._cpu_rampdown),
+                          ('sys_rampup', self._sys_rampup),
+                          ('sys_rampdown', self._sys_rampdown)]:
+            if key in self._sliders:
+                for i, (scale, lbl) in enumerate(zip(self._sliders[key],
+                                                      self._slider_labels[key])):
+                    try:
+                        scale.set(vals[i])
+                        lbl.config(text=f"{vals[i]}°")
+                    except tk.TclError:
+                        pass
+
+        if self._status_lbl:
+            self._status_lbl.config(
+                text=("↺ Standard geladen" if LANG == 'de' else "↺ Standard loaded"),
+                fg=C_CYAN)
+
+    def _apply_all(self):
+        """Alle Einstellungen an sysfs schreiben + in fancontrol.service persistieren."""
+        ok = True
+
+        # ── CPU-Kühler: Fan 1 + Fan 2 gemeinsam ──
+        cpu_mode = self._cpu_mode.get()
+        for fan in (1, 2):
+            if cpu_mode == 'curve':
+                up_str = ','.join(str(v) for v in self._get_slider_values('cpu_rampup'))
+                dn_str = ','.join(str(v) for v in self._get_slider_values('cpu_rampdown'))
+                ok &= _sysfs_write(f"{BASE_PATH}/fan{fan}/rampup_curve", up_str)
+                ok &= _sysfs_write(f"{BASE_PATH}/fan{fan}/rampdown_curve", dn_str)
+            elif cpu_mode == 'fixed':
+                lv = self._cpu_level.get()
+                ok &= _sysfs_write(f"{BASE_PATH}/fan{fan}/level", str(lv))
+
+            # Mode zuletzt setzen (triggert die Aktivierung)
+            ok &= _sysfs_write(f"{BASE_PATH}/fan{fan}/mode", cpu_mode)
+
+        # ── System-Lüfter: Fan 3 ──
+        sys_mode = self._sys_mode.get()
+        if sys_mode == 'curve':
+            up_str = ','.join(str(v) for v in self._get_slider_values('sys_rampup'))
+            dn_str = ','.join(str(v) for v in self._get_slider_values('sys_rampdown'))
+            ok &= _sysfs_write(f"{BASE_PATH}/fan3/rampup_curve", up_str)
+            ok &= _sysfs_write(f"{BASE_PATH}/fan3/rampdown_curve", dn_str)
+        elif sys_mode == 'fixed':
+            lv = self._sys_level.get()
+            ok &= _sysfs_write(f"{BASE_PATH}/fan3/level", str(lv))
+
+        ok &= _sysfs_write(f"{BASE_PATH}/fan3/mode", sys_mode)
+
+        # ── APU Power Mode ──
+        pw = self._power_mode.get()
+        ok &= _sysfs_write(f"{BASE_PATH}/apu/power_mode", pw)
+
+        # ── Persistieren: fancontrol.service aktualisieren/erstellen ──
+        svc_ok = self._persist_to_service(cpu_mode, sys_mode, pw)
+        
+        # Status anzeigen
+        if self._status_lbl:
+            if ok and svc_ok:
+                txt = T[LANG]['cfg_applied'] + " + Service"
+                self._status_lbl.config(text=txt, fg=C_GREEN)
+            elif ok:
+                self._status_lbl.config(text=T[LANG]['cfg_applied'], fg=C_YELLOW)
+            else:
+                self._status_lbl.config(text=T[LANG]['cfg_error'], fg=C_RED)
+
+    def _persist_to_service(self, cpu_mode, sys_mode, power_mode):
+        """Erstellt oder aktualisiert /etc/systemd/system/fancontrol.service.
+        
+        Wenn der Service nicht existiert → wird automatisch installiert + enabled.
+        Liefert True bei Erfolg.
+        """
+        # Aktuelle Werte sammeln (Slider haben Vorrang vor State)
+        cpu_up = self._get_slider_values('cpu_rampup')
+        cpu_dn = self._get_slider_values('cpu_rampdown')
+        sys_up = self._get_slider_values('sys_rampup')
+        sys_dn = self._get_slider_values('sys_rampdown')
+
+        # Service-Inhalt generieren
+        lines = [
+            "[Unit]",
+            "Description=Set Strix Halo fan curves (managed by AXB35 Monitor)",
+            "After=multi-user.target",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            "RemainAfterExit=yes",
+            "",
+        ]
+
+        def _fan_lines(fan, mode, up_vals, dn_vals, level):
+            """ExecStart-Zeilen für einen Lüfter generieren."""
+            out = []
+            if mode == 'curve':
+                up_str = ','.join(str(v) for v in up_vals)
+                dn_str = ','.join(str(v) for v in dn_vals)
+                out.append(f"ExecStart=/bin/sh -c 'echo \"{up_str}\" > /sys/devices/virtual/ec_su_axb35/fan{fan}/rampup_curve'")
+                out.append(f"ExecStart=/bin/sh -c 'echo \"{dn_str}\" > /sys/devices/virtual/ec_su_axb35/fan{fan}/rampdown_curve'")
+            elif mode == 'fixed':
+                out.append(f"ExecStart=/bin/sh -c 'echo \"{level}\" > /sys/devices/virtual/ec_su_axb35/fan{fan}/level'")
+            # Mode-Zeile (immer, außer "auto" – dann skippt der Treiber ohnehin)
+            if mode != 'auto':
+                out.append(f"ExecStart=/bin/sh -c 'echo \"{mode}\" > /sys/devices/virtual/ec_su_axb35/fan{fan}/mode'")
+            return out
+
+        # CPU-Kühler (Fan 1 + Fan 2)
+        cpu_lv = self._cpu_level.get()
+        lines.extend(_fan_lines(1, cpu_mode, cpu_up, cpu_dn, cpu_lv))
+        lines.append("")
+        lines.extend(_fan_lines(2, cpu_mode, cpu_up, cpu_dn, cpu_lv))
+        lines.append("")
+
+        # System-Lüfter (Fan 3)
+        sys_lv = self._sys_level.get()
+        lines.extend(_fan_lines(3, sys_mode, sys_up, sys_dn, sys_lv))
+        lines.append("")
+
+        # Power Mode
+        if power_mode != 'balanced':  # nur schreiben wenn nicht Default
+            lines.append(f"ExecStart=/bin/sh -c 'echo \"{power_mode}\" > /sys/devices/virtual/ec_su_axb35/apu/power_mode'")
+            lines.append("")
+
+        lines.extend(["[Install]", "WantedBy=multi-user.target", ""])
+
+        service_content = '\n'.join(lines)
+
+        # Per sudo schreiben + daemon-reload (+ enable falls neu)
+        svc_path = "/etc/systemd/system/fancontrol.service"
+        
+        # Prüfen ob Service schon existiert (für enable-Logik)
+        exists_check = subprocess.run(
+            ['test', '-f', svc_path], capture_output=True
+        )
+        needs_enable = (exists_check.returncode != 0)
+
+        # Alles in einem sudo-Aufruf: schreiben + reload (+ optional enable)
+        cmd_parts = [f'cat > {svc_path} << \'SVC_EOF\'']
+        cmd_parts.append(service_content)
+        cmd_parts.append('SVC_EOF')
+        cmd_parts.append('systemctl daemon-reload')
+        if needs_enable:
+            cmd_parts.append('systemctl enable fancontrol 2>/dev/null || true')
+
+        full_cmd = '\n'.join(cmd_parts)
+        
+        try:
+            r = subprocess.run(['sudo', '-n', 'sh', '-c', full_cmd],
+                             capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _get_slider_values(self, key):
+        """Aktuelle Werte aus den Slider-Widgets lesen (falls vorhanden)."""
+        if key in self._sliders:
+            try:
+                return [int(s.get()) for s in self._sliders[key]]
+            except tk.TclError:
+                pass
+        # Fallback auf State-Liste
+        fallback = {
+            'cpu_rampup': self._cpu_rampup, 'cpu_rampdown': self._cpu_rampdown,
+            'sys_rampup': self._sys_rampup, 'sys_rampdown': self._sys_rampdown,
+        }
+        return list(fallback.get(key, [0] * 5))
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 # ─── Haupt-App ────────────────────────────────────────────────────────────
 class SystemMonitorApp:
 
@@ -262,23 +969,45 @@ class SystemMonitorApp:
         self.setup_window()
         self.create_widgets()
 
+        # Gespeicherte Zoom-Stufe anwenden (Widgets müssen existieren)
+        if self.scale != 1.0:
+            self._apply_zoom()
+
         self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
         self.monitor_thread.start()
 
     # ─── Fenster ────────────────────────────────────────────────────────
     def setup_window(self):
         self.root.title("Axb35-monitor")
-        self.root.geometry("720x430")
-        self.root.minsize(680, 410)
         self.root.configure(bg=C_BG)
 
-        # Layout vor Zentrieren finalisieren (damit Canvas-Breiten korrekt sind)
-        self.root.update_idletasks()
-        w = self.root.winfo_width() or 640
-        h = self.root.winfo_height() or 480
-        x = (self.root.winfo_screenwidth() - w) // 2
-        y = (self.root.winfo_screenheight() - h) // 3
+        # Gespeicherte Config laden (Zoom + Position aus letzter Session)
+        cfg = load_config()
+        saved_scale = cfg.get('scale', 1.0)
+        saved_x     = cfg.get('win_x')
+        saved_y     = cfg.get('win_y')
+
+        # Fenstergröße basierend auf gespeicherter Zoom-Stufe
+        base_w, base_h = 720, 430
+        w = max(360, int(base_w * saved_scale))
+        h = max(240, int(base_h * saved_scale))
+        self.root.geometry(f"{w}x{h}")
+        self.root.minsize(max(320, int(500 * saved_scale)), max(200, int(320 * saved_scale)))
+
+        # Position: gespeichert oder zentriert
+        if saved_x is not None and saved_y is not None:
+            x, y = saved_x, saved_y
+        else:
+            self.root.update_idletasks()
+            w = self.root.winfo_width() or 720
+            h = self.root.winfo_height() or 430
+            x = (self.root.winfo_screenwidth() - w) // 2
+            y = (self.root.winfo_screenheight() - h) // 3
         self.root.geometry(f"+{x}+{y}")
+
+        # Gespeicherte Zoom-Stufe anwenden (nach Widget-Erstellung)
+        if saved_scale != 1.0:
+            self.scale = round(saved_scale, 1)
 
         # Zoom-Bindings: Ctrl+= / Ctrl+- / Ctrl+0 (inkl. Numpad)
         self.root.bind("<Control-plus>", lambda e: self._zoom(0.1))
@@ -302,10 +1031,10 @@ class SystemMonitorApp:
     # ─── Sektion 1: Temperaturen (CPU + GPU + NVMe nebeneinander) ──────
     def _build_temp_section(self, parent):
         frame = tk.Frame(parent, bg=C_SURFACE)
-        frame.pack(fill=tk.X, pady=(0, 12))
+        frame.pack(fill=tk.X, pady=(0, 8))
 
         inner = tk.Frame(frame, bg=C_SURFACE)
-        inner.pack(padx=14, pady=12)
+        inner.pack(padx=12, pady=6)
 
         # CPU Temp (links)
         cpu_col = tk.Frame(inner, bg=C_SURFACE)
@@ -315,10 +1044,10 @@ class SystemMonitorApp:
                  bg=C_SURFACE, fg=C_DIM); _lbl.pack()
         self._reg(_lbl, "Segoe UI", 9)
         self.cpu_temp_lbl = tk.Label(
-            cpu_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            cpu_col, text="--°C", font=("Segoe UI", 26, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.cpu_temp_lbl.pack()
-        self._reg(self.cpu_temp_lbl, "Segoe UI", 32, "bold")
+        self._reg(self.cpu_temp_lbl, "Segoe UI", 26, "bold")
         self.cpu_temp_sub = tk.Label(
             cpu_col, text="Min: --°  Max: --°", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
@@ -337,10 +1066,10 @@ class SystemMonitorApp:
                  bg=C_SURFACE, fg=C_DIM); _lbl.pack()
         self._reg(_lbl, "Segoe UI", 9)
         self.gpu_temp_lbl = tk.Label(
-            gpu_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            gpu_col, text="--°C", font=("Segoe UI", 26, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.gpu_temp_lbl.pack()
-        self._reg(self.gpu_temp_lbl, "Segoe UI", 32, "bold")
+        self._reg(self.gpu_temp_lbl, "Segoe UI", 26, "bold")
         self.gpu_temp_sub = tk.Label(
             gpu_col, text="Radeon 8060S", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
@@ -359,10 +1088,10 @@ class SystemMonitorApp:
                  bg=C_SURFACE, fg=C_DIM); _lbl.pack()
         self._reg(_lbl, "Segoe UI", 9)
         self.nvme_temp_lbl = tk.Label(
-            nvme_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            nvme_col, text="--°C", font=("Segoe UI", 26, "bold"),
             bg=C_SURFACE, fg=C_GREEN)
         self.nvme_temp_lbl.pack()
-        self._reg(self.nvme_temp_lbl, "Segoe UI", 32, "bold")
+        self._reg(self.nvme_temp_lbl, "Segoe UI", 26, "bold")
         self.nvme_temp_sub = tk.Label(
             nvme_col, text="SSD", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
@@ -381,10 +1110,10 @@ class SystemMonitorApp:
                  bg=C_SURFACE, fg=C_DIM); _lbl.pack()
         self._reg(_lbl, "Segoe UI", 9)
         self.nvme2_temp_lbl = tk.Label(
-            nvme2_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            nvme2_col, text="--°C", font=("Segoe UI", 26, "bold"),
             bg=C_SURFACE, fg=C_DIM)
         self.nvme2_temp_lbl.pack()
-        self._reg(self.nvme2_temp_lbl, "Segoe UI", 32, "bold")
+        self._reg(self.nvme2_temp_lbl, "Segoe UI", 26, "bold")
         self.nvme2_temp_sub = tk.Label(
             nvme2_col, text="SSD", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
@@ -403,10 +1132,10 @@ class SystemMonitorApp:
                  bg=C_SURFACE, fg=C_DIM); _lbl.pack()
         self._reg(_lbl, "Segoe UI", 9)
         self.ext_temp_lbl = tk.Label(
-            ext_col, text="--°C", font=("Segoe UI", 32, "bold"),
+            ext_col, text="--°C", font=("Segoe UI", 26, "bold"),
             bg=C_SURFACE, fg=C_DIM)
         self.ext_temp_lbl.pack()
-        self._reg(self.ext_temp_lbl, "Segoe UI", 32, "bold")
+        self._reg(self.ext_temp_lbl, "Segoe UI", 26, "bold")
         self.ext_temp_sub = tk.Label(
             ext_col, text="USB-SSD", font=("Segoe UI", 9),
             bg=C_SURFACE, fg=C_DIM)
@@ -422,8 +1151,9 @@ class SystemMonitorApp:
         self._add_usage_row(frame, "GPU",  "gpu")
         self._add_usage_row(frame, "RAM",  "ram")
         self._add_usage_row(frame, "VRAM", "vram")
-        self._add_usage_row(frame, "NVMe", "nvme")
-        self._add_usage_row(frame, "EXT",  "ext")
+        self._add_usage_row(frame, "NVMe",  "nvme")
+        self._add_usage_row(frame, "NVMe2", "nvme2")
+        self._add_usage_row(frame, "EXT",   "ext")
 
     def _add_usage_row(self, parent, label_text, key):
         row = tk.Frame(parent, bg=C_BG)
@@ -439,9 +1169,9 @@ class SystemMonitorApp:
         canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6), pady=2)
         rect_id = canvas.create_rectangle(0, 0, 2, 8, fill=C_BLUE, outline="")
 
-        # Wert rechts
+        # Wert rechts (width=16 reicht für "919.0/1831.7 GB" + gibt Balken mehr Platz)
         val_lbl = tk.Label(row, text="--", font=("Consolas", 10),
-                           bg=C_BG, fg=C_DIM, width=22, anchor="e")
+                           bg=C_BG, fg=C_DIM, width=16, anchor="e")
         val_lbl.pack(side=tk.RIGHT)
         self._reg(val_lbl, "Consolas", 10)
 
@@ -451,10 +1181,19 @@ class SystemMonitorApp:
             'value_lbl': val_lbl,
         }
 
-    # ─── Sektion 3: Lüfter (bestehend) ──────────────────────────────────
+    # ─── Sektion 3: Lüfter (bestehend + ⚙️ Config-Button) ──────────────
     def _build_fans_section(self, parent):
         container = tk.Frame(parent, bg=C_BG)
         container.pack(fill=tk.X, pady=(0, 12))
+
+        # ⚙️ Config-Icon (rechts oben in der Lüfter-Sektion)
+        self._config_win = None  # Referenz auf FanConfigWindow
+        gear_btn = tk.Button(container, text="⚙", font=("Segoe UI", 14),
+                            command=self._open_config_gui,
+                            bg=C_BG, fg=C_DIM, activebackground=C_SURFACE,
+                            activeforeground=C_TEXT, relief=tk.FLAT, bd=0,
+                            highlightthickness=0, cursor="hand2", padx=6)
+        gear_btn.pack(side=tk.RIGHT, pady=(0, 4))
 
         names = [T[LANG]['fan1'], T[LANG]['fan2'], T[LANG]['fan3']]
         self.fan_w = []
@@ -462,6 +1201,18 @@ class SystemMonitorApp:
         for i, name in enumerate(names):
             w = self._create_fan_row(container, i, name)
             self.fan_w.append(w)
+
+    def _open_config_gui(self):
+        """Config-Fenster öffnen (oder fokussieren wenn schon offen)."""
+        if self._config_win is not None:
+            try:
+                if self._config_win.win.winfo_exists():
+                    self._config_win.win.lift()
+                    self._config_win.win.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self._config_win = FanConfigWindow(self.root)
 
     def _create_fan_row(self, parent, idx, name):
         row = tk.Frame(parent, bg=C_BG)
@@ -675,6 +1426,19 @@ class SystemMonitorApp:
             txt = f"{nvme_disk['used_gb']}/{nvme_disk['total_gb']} GB"
             self._update_bar(self.usage_w['nvme'], nvme_disk['pct'], txt)
 
+        # NVMe2: Speicherplatz-Balken (Temp ist oben, zeigt -- wenn nicht da)
+        nvme2_disk = data.get('nvme2_disk')
+        if nvme2_disk is not None:
+            txt = f"{nvme2_disk['used_gb']}/{nvme2_disk['total_gb']} GB"
+            self._update_bar(self.usage_w['nvme2'], nvme2_disk['pct'], txt)
+        else:
+            # Nicht installiert → Balken leer + "--"
+            bar_w = self.usage_w['nvme2']
+            canvas = bar_w['canvas']
+            if canvas.winfo_width() > 10:
+                canvas.coords(bar_w['rect'], 0, 0, 0, 8)
+            bar_w['value_lbl'].config(text="--", fg=C_DIM)
+
         # Externe SSD: Speicherplatz-Balken (Temp ist oben in der 4. Spalte)
         ext_disk = data.get('ext_disk')
         if ext_disk is not None:
@@ -743,23 +1507,20 @@ class SystemMonitorApp:
             data['cpu_temp_min'] = read_int(f"{BASE_PATH}/temp1/min")
             data['cpu_temp_max'] = read_int(f"{BASE_PATH}/temp1/max")
 
-            # GPU-Temperatur (amdgpu hwmon, m°C → °C) – dynamisch erkannt
-            if HWMON_AMDGPU:
-                gpu_raw = read_int(f"{HWMON_AMDGPU}/temp1_input")
-                if gpu_raw is not None:
-                    data['gpu_temp'] = round(gpu_raw / 1000.0)
+            # GPU-Temperatur (amdgpu hwmon, m°C → °C)
+            gpu_raw = read_int(f"{HWMON_AMDGPU}/temp1_input")
+            if gpu_raw is not None:
+                data['gpu_temp'] = round(gpu_raw / 1000.0)
 
-            # NVMe-Temperatur (intern, hwmon, m°C → °C) – dynamisch erkannt
-            if HWMON_NVME:
-                nvme_raw = read_int(f"{HWMON_NVME}/temp1_input")
-                if nvme_raw is not None:
-                    data['nvme_temp'] = round(nvme_raw / 1000.0)
+            # NVMe-Temperatur (intern 1, hwmon, m°C → °C)
+            nvme_raw = read_int(f"{HWMON_NVME}/temp1_input")
+            if nvme_raw is not None:
+                data['nvme_temp'] = round(nvme_raw / 1000.0)
 
-            # NVMe2-Temperatur (intern 2, zeigt -- wenn nicht vorhanden)
-            if HWMON_NVME2:
-                nvme2_raw = read_int(f"{HWMON_NVME2}/temp1_input")
-                if nvme2_raw is not None:
-                    data['nvme2_temp'] = round(nvme2_raw / 1000.0)
+            # NVMe-Temperatur (intern 2 – kommt demnächst, zeigt -- wenn nicht da)
+            nvme2_raw = read_int(f"{HWMON_NVME2}/temp1_input")
+            if nvme2_raw is not None:
+                data['nvme2_temp'] = round(nvme2_raw / 1000.0)
 
             # Externe NVMe (USB, via smartctl – nur wenn angeschlossen)
             ext = get_ext_nvme()
@@ -792,10 +1553,15 @@ class SystemMonitorApp:
                 data['vram_used_gb']  = vram['used_gb']
                 data['vram_total_gb'] = vram['total_gb']
 
-            # NVMe-Speicherplatz (intern)
+            # NVMe-Speicherplatz (intern 1)
             nvme_disk = get_disk_usage()
             if nvme_disk:
                 data['nvme_disk'] = nvme_disk
+
+            # NVMe2-Speicherplatz (intern 2 – falls vorhanden)
+            nvme2_disk = get_nvme2_disk_usage()
+            if nvme2_disk:
+                data['nvme2_disk'] = nvme2_disk
 
             # Externe SSD – Speicherplatz
             ext_disk = get_ext_disk_usage()
@@ -832,6 +1598,20 @@ class SystemMonitorApp:
             self.monitor_thread.join(timeout=2.0)
         except RuntimeError:
             pass
+        # Config-Fenster mit schließen (falls offen)
+        if hasattr(self, '_config_win') and self._config_win is not None:
+            self._config_win.close()
+
+        # Zoom + Fensterposition speichern für nächste Session
+        try:
+            save_config(
+                scale=self.scale,
+                win_x=self.root.winfo_x(),
+                win_y=self.root.winfo_y()
+            )
+        except Exception:
+            pass
+
         self.root.destroy()
 
 
