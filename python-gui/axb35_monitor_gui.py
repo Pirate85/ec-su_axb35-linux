@@ -1626,7 +1626,7 @@ def main():
         print("╚══════════════════════════════════════════════════╝")
         sys.exit(1)
 
-    root = tk.Tk(className="axb35-monitor")
+    root = tk.Tk(className="Axb35-monitor")
     app = SystemMonitorApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
