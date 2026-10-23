@@ -10,13 +10,15 @@ echo "=== ec-su_axb35-linux: Installation ==="
 
 # 1) Register + build + install DKMS module
 echo "[1/6] Registering DKMS module..."
+# Clean up any existing/broken DKMS entry first
+dkms remove "$DKMS_MODULE" -v "$DKMS_VERSION" --all 2>/dev/null || true
 dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" || true
 
 echo "[2/6] Building kernel module (this may take a minute)..."
-dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build"
+dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" -k "$(uname -r)"
 
 echo "[3/6] Installing module + enabling auto-load..."
-dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build"
+dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" -k "$(uname -r)"
 
 # 2) Auto-load at boot
 echo "[4/6] Configuring boot persistence..."

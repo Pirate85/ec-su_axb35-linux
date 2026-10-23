@@ -32,14 +32,16 @@ echo "SIGNING_KEY=${MOK_KEY_DIR}/zmkpk.x509" > /etc/dkms/framework.conf.d/ec_su_
 
 # 2) Register + build + install DKMS module (signed!)
 echo "[2/7] Registering DKMS module..."
+# Clean up any existing/broken DKMS entry first
+dkms remove "$DKMS_MODULE" -v "$DKMS_VERSION" --all 2>/dev/null || true
 dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" || true
 
 echo "[3/7] Building kernel module (SIGNED – may take a minute)..."
-dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build" \
+dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION"  -k "$(uname -r)" \
     SIGNING_KEY="${MOK_KEY_DIR}/zmkpk.x509"
 
 echo "[4/7] Installing module..."
-dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --kernel-dir "/lib/modules/$(uname -r)/build" \
+dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION"  -k "$(uname -r)" \
     SIGNING_KEY="${MOK_KEY_DIR}/zmkpk.x509"
 
 # 3) Auto-load at boot

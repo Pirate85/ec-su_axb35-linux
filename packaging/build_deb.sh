@@ -10,7 +10,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"      # → GMKtec Evo-X2 Lüftersteuerung V1.1/
-PROJECT_ROOT="${REPO_ROOT}/ec-su_axb35-linux"  # → ec-su_axb35-linux/ (Source + GUI)
+if [ -d "${REPO_ROOT}/ec-su_axb35-linux/src" ]; then
+    PROJECT_ROOT="${REPO_ROOT}/ec-su_axb35-linux"
+else
+    PROJECT_ROOT="${REPO_ROOT}"
+fi
 DIST_DIR="${SCRIPT_DIR}/dist"
 BUILD_TMP="/tmp/ec-deb-build-$$"
 
@@ -47,7 +51,7 @@ build_deb() {
     mkdir -p "${staging}/DEBIAN"
 
     # ── Copy DKMS source (Kbuild + src/) ──
-    cp "${PROJECT_ROOT}/Kbuild"  "${staging}/usr/src/ec_su_axb35-1.1/"
+    cp "${PROJECT_ROOT}/Makefile"  "${staging}/usr/src/ec_su_axb35-1.1/"
     cp "${PROJECT_ROOT}/src/ec_su_axb35.c" "${staging}/usr/src/ec_su_axb35-1.1/src/"
     cp "${SCRIPT_DIR}/dkms.conf" "${staging}/usr/src/ec_su_axb35-1.1/"
 
